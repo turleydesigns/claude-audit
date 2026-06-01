@@ -1,6 +1,6 @@
 {
   "name": "@uxcontinuum/ccaudit",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "A diagnostic for your Claude Code setup. Reads ~/.claude/ locally, grades you across hook coverage, project hygiene, tool balance, prompt tells, and pipeline ops. Zero install: npx @uxcontinuum/ccaudit",
   "main": "index.js",
   "bin": {
