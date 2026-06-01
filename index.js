@@ -44,11 +44,11 @@ const CLAUDE_DIRS = findClaudeDirs();
 // ── SESSION TYPE CLASSIFIER ───────────────────────────────────────────────────
 // Agent-spawned worktrees end with a 32-char hex hash (your orchestrator's
 // pattern). Named project dirs are human.
-// Agent worktrees use either UUIDv4 names (orchestrator-spawned) or ULID-style
-// hex suffixes appended to a path. Human dirs are word-segmented.
+// Agent / subagent sessions are detected via the JSONL fields themselves
+// (isSidechain, userType, agentId). Directory naming is a weak fallback only.
 const UUID_RE     = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 const HEX_TAIL_RE = /-[0-9a-f]{20,}$/;
-function isAgentProjectDir(name) {
+function fallbackAgentDirGuess(name) {
   if (UUID_RE.test(name)) return true;
   if (HEX_TAIL_RE.test(name)) return true;
   return false;
@@ -83,16 +83,33 @@ function parseSession(filePath, cutoffMs) {
   const toolCalls   = [];
   const timestamps  = [];
   let title = null;
+  let slug  = null;
+  let cwd   = null;
   let outputTokens = 0;
   let inputTokens  = 0;
+  let isSidechain  = false;
+  let userType     = null;
+  let entrypoint   = null;
+  let claudeVersion = null;
+  let messageCount = 0;
 
   for (const raw of lines) {
     if (!raw) continue;
     let msg;
     try { msg = JSON.parse(raw); } catch (_) { continue; }
 
+    // Capture session-level metadata from the first message that has it.
+    if (cwd === null && typeof msg.cwd === 'string')               cwd = msg.cwd;
+    if (slug === null && typeof msg.slug === 'string')             slug = msg.slug;
+    if (userType === null && typeof msg.userType === 'string')     userType = msg.userType;
+    if (entrypoint === null && typeof msg.entrypoint === 'string') entrypoint = msg.entrypoint;
+    if (claudeVersion === null && typeof msg.version === 'string') claudeVersion = msg.version;
+    if (msg.isSidechain === true) isSidechain = true;
+
     if (msg.type === 'custom-title') { title = msg.title || ''; continue; }
     if (msg.type !== 'user' && msg.type !== 'assistant') continue;
+
+    messageCount++;
 
     if (msg.timestamp) {
       const t = Date.parse(msg.timestamp);
@@ -124,15 +141,28 @@ function parseSession(filePath, cutoffMs) {
   if (!timestamps.length) return null;
 
   const projDir = projDirName(filePath);
+  // Multi-signal agent detector. Any of these is sufficient:
+  //   - isSidechain: subagent inside another Claude session
+  //   - userType non-external: internal automation invocation
+  //   - dir-name matches UUID/hex pattern: orchestrator-spawned worktree
+  const isAgent = isSidechain ||
+                  (userType && userType !== 'external') ||
+                  fallbackAgentDirGuess(projDir);
+
   return {
     projDir,
-    isAgent: isAgentProjectDir(projDir),
+    isAgent,
     title: title || '',
+    slug: slug || '',
+    cwd: cwd || '',
     userPrompts,
     toolCalls,
     timestamps,
     outputTokens,
     inputTokens,
+    claudeVersion,
+    entrypoint,
+    messageCount,
   };
 }
 
@@ -142,13 +172,11 @@ function inspectClaudeDir(claudeDir) {
     claudeDir,
     hasSettings: false,
     settingsValid: false,
-    preToolUseHooks: 0,
-    postToolUseHooks: 0,
-    userPromptSubmitHooks: 0,
-    stopHooks: 0,
-    subagentStopHooks: 0,
-    notificationHooks: 0,
+    settingsParseError: null,
+    hooksByEvent: {},   // dynamic, captures any event type configured
+    totalHooks: 0,
     autoMemoryEnabled: false,
+    mcpServers: 0,
     hookFiles: [],
     hasClaudeMd: false,
     claudeMdBytes: 0,
@@ -163,15 +191,34 @@ function inspectClaudeDir(claudeDir) {
         const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
         out.settingsValid = true;
         const hooks = s.hooks || {};
-        const count = (entries) => (entries || []).reduce((n, e) => n + (e.hooks || []).length, 0);
-        out.preToolUseHooks       = count(hooks.PreToolUse);
-        out.postToolUseHooks      = count(hooks.PostToolUse);
-        out.userPromptSubmitHooks = count(hooks.UserPromptSubmit);
-        out.stopHooks             = count(hooks.Stop);
-        out.subagentStopHooks     = count(hooks.SubagentStop);
-        out.notificationHooks     = count(hooks.Notification);
-        out.autoMemoryEnabled     = s.autoMemoryEnabled === true;
-      } catch (_) {}
+        for (const [evt, entries] of Object.entries(hooks)) {
+          if (!Array.isArray(entries)) continue;
+          const n = entries.reduce((acc, e) => acc + (Array.isArray(e?.hooks) ? e.hooks.length : 0), 0);
+          if (n > 0) {
+            out.hooksByEvent[evt] = n;
+            out.totalHooks += n;
+          }
+        }
+        out.autoMemoryEnabled = s.autoMemoryEnabled === true;
+        // MCP servers can live in settings.json or ~/.claude.json. Count both.
+        if (s.mcpServers && typeof s.mcpServers === 'object') {
+          out.mcpServers = Object.keys(s.mcpServers).length;
+        }
+      } catch (e) {
+        out.settingsParseError = e.message;
+      }
+    }
+  } catch (_) {}
+
+  // ~/.claude.json (user-level MCP + global config). Optional.
+  try {
+    const cj = path.join(claudeDir, '..', '.claude.json');
+    const st = fs.statSync(cj);
+    if (st.isFile()) {
+      const parsed = JSON.parse(fs.readFileSync(cj, 'utf8'));
+      if (parsed?.mcpServers && typeof parsed.mcpServers === 'object') {
+        out.mcpServers = Math.max(out.mcpServers, Object.keys(parsed.mcpServers).length);
+      }
     }
   } catch (_) {}
 
@@ -217,6 +264,10 @@ function aggregate(sessions) {
     const prompts = subset.flatMap(s => s.userPrompts);
     const tools = subset.flatMap(s => s.toolCalls);
     const titled = subset.filter(s => s.title).length;
+    const slugged = subset.filter(s => s.slug).length;
+
+    const cwds = new Set();
+    for (const s of subset) if (s.cwd) cwds.add(s.cwd);
 
     const toolCounts = {};
     for (const t of tools) toolCounts[t] = (toolCounts[t] || 0) + 1;
@@ -236,6 +287,8 @@ function aggregate(sessions) {
       sessions: subset.length,
       prompts: prompts.length,
       titledPct: Math.round(100 * titled / subset.length),
+      sluggedPct: Math.round(100 * slugged / subset.length),
+      uniqueCwds: cwds.size,
       avgPromptLen,
       justCount,
       pleaseCount,
@@ -282,10 +335,8 @@ function grade(stats, setup) {
   const human = stats.human || {};
   const agent = stats.agent || {};
 
-  // 1. Hook coverage. Lives at the setup layer, applies to everyone.
-  const hookSignals =
-    setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks +
-    setup.stopHooks + setup.subagentStopHooks + setup.notificationHooks;
+  // 1. Hook coverage. Generic count across whatever event types are configured.
+  const hookSignals = setup.totalHooks;
   let hookScore;
   if (hookSignals === 0) hookScore = 35;
   else if (hookSignals === 1) hookScore = 68;
@@ -293,15 +344,10 @@ function grade(stats, setup) {
   else if (hookSignals === 3) hookScore = 90;
   else hookScore = Math.min(100, 92 + hookSignals);
   if (setup.autoMemoryEnabled) hookScore = Math.min(100, hookScore + 3);
-  const hookBreakdown = [
-    setup.preToolUseHooks ? `${setup.preToolUseHooks} PreToolUse` : null,
-    setup.postToolUseHooks ? `${setup.postToolUseHooks} PostToolUse` : null,
-    setup.userPromptSubmitHooks ? `${setup.userPromptSubmitHooks} UserPromptSubmit` : null,
-    setup.stopHooks ? `${setup.stopHooks} Stop` : null,
-    setup.subagentStopHooks ? `${setup.subagentStopHooks} SubagentStop` : null,
-    setup.notificationHooks ? `${setup.notificationHooks} Notification` : null,
-    setup.autoMemoryEnabled ? 'autoMemory plugin' : null,
-  ].filter(Boolean).join(', ');
+  const hookBreakdown = Object.entries(setup.hooksByEvent)
+    .map(([evt, n]) => `${n} ${evt}`)
+    .concat(setup.autoMemoryEnabled ? ['autoMemory plugin'] : [])
+    .join(', ');
   dims.push({
     name: 'Hook coverage',
     score: hookScore,
@@ -314,18 +360,29 @@ function grade(stats, setup) {
   });
 
   // 2. Project hygiene (human sessions only).
+  // Three signals: custom titles (strongest), slugs (informal auto-titles),
+  // and CWD diversity (project-scoped work via tmux or shell). Any of these
+  // counts as organizational hygiene.
   if (human.sessions) {
     let hScore = 50;
-    hScore += Math.round(human.titledPct * 0.5); // titled sessions help up to +50
-    if (human.avgPromptLen > 0 && human.avgPromptLen < 80) hScore -= 10; // too terse
-    if (human.avgPromptLen > 1500) hScore -= 8; // walls of text
+    hScore += Math.round(human.titledPct * 0.35);      // formal title bonus
+    hScore += Math.round(human.sluggedPct * 0.15);     // slug bonus (smaller)
+    // CWD diversity: launching Claude from named project dirs is good hygiene
+    if (human.uniqueCwds >= 3)  hScore += 8;
+    if (human.uniqueCwds >= 10) hScore += 7;
+    if (human.uniqueCwds >= 25) hScore += 5;
+    if (human.avgPromptLen > 0 && human.avgPromptLen < 80) hScore -= 8;
+    if (human.avgPromptLen > 1500) hScore -= 6;
     hScore = Math.max(0, Math.min(100, hScore));
+    const titleNote = human.titledPct > 0
+      ? `${human.titledPct}% titled`
+      : (human.sluggedPct > 0 ? `${human.sluggedPct}% have auto-slugs` : 'no titles, no slugs');
     dims.push({
       name: 'Project hygiene (human)',
       score: hScore,
-      detail: `${human.titledPct}% of your human sessions are titled. Avg prompt: ${human.avgPromptLen} chars.`,
-      fix: human.titledPct < 30
-        ? 'Title your sessions. Untitled sessions are unsearchable history.'
+      detail: `${titleNote}, launched from ${human.uniqueCwds} distinct working dirs. Avg prompt: ${human.avgPromptLen} chars.`,
+      fix: (human.titledPct < 20 && human.uniqueCwds < 5)
+        ? 'Title your important sessions, or launch from project dirs so each session is scoped.'
         : null,
     });
   }
@@ -424,9 +481,13 @@ function renderCard(stats, setup, graded) {
   if (stats.agent) {
     pr(`    ${C.dim}Agent sessions:${C.reset}  ${stats.agent.sessions} sessions, ${(stats.agent.outputTokens / 1e6).toFixed(2)}M output tokens`);
   }
-  pr(`    ${C.dim}Hooks installed:${C.reset} ${setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks + setup.stopHooks + setup.subagentStopHooks + setup.notificationHooks} across all event types (${setup.hookFiles.length} hook file(s) in ~/.claude/hooks/)`);
+  pr(`    ${C.dim}Hooks installed:${C.reset} ${setup.totalHooks} across ${Object.keys(setup.hooksByEvent).length} event type(s) (${setup.hookFiles.length} hook file(s) in ~/.claude/hooks/)`);
   pr(`    ${C.dim}CLAUDE.md:${C.reset}       ${setup.hasClaudeMd ? `${setup.claudeMdBytes} bytes` : 'not found'}`);
+  pr(`    ${C.dim}MCP servers:${C.reset}     ${setup.mcpServers}`);
   pr(`    ${C.dim}Skills installed:${C.reset} ${setup.skillCount}`);
+  if (setup.settingsParseError) {
+    pr(`    ${C.yellow}settings.json parse error:${C.reset} ${setup.settingsParseError}`);
+  }
 
   pr();
   pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
@@ -453,8 +514,24 @@ const files = projectsDirs.flatMap(d => findJsonl(d, cutoffMs));
 const sessions = files.map(f => parseSession(f, cutoffMs)).filter(Boolean);
 
 if (!sessions.length) {
-  pr(`No Claude Code sessions found in the last ${days} days.`);
-  pr(`Looked in: ${projectsDirs.join(', ') || CLAUDE_DIRS.join(', ')}`);
+  pr();
+  pr(`  ${C.bold}ccaudit${C.reset}: no Claude Code session activity in the last ${days} days.`);
+  if (!projectsDirs.length) {
+    pr(`  ${C.dim}No ~/.claude/projects/ directory found. Looked in: ${CLAUDE_DIRS.join(', ')}${C.reset}`);
+    pr(`  ${C.dim}Either Claude Code is not installed, you have a non-default home dir, or this is a brand-new setup.${C.reset}`);
+  } else {
+    pr(`  ${C.dim}Scanned: ${projectsDirs.join(', ')}${C.reset}`);
+    pr(`  ${C.dim}Try --days 90 or --days 365 to widen the window.${C.reset}`);
+  }
+  // Still surface the setup audit even with no sessions, so brand-new users get value.
+  const setupOnly = inspectClaudeDir(CLAUDE_DIRS[0]);
+  pr();
+  pr(`  ${C.bold}Setup snapshot:${C.reset}`);
+  pr(`    Hooks: ${setupOnly.totalHooks} (${Object.keys(setupOnly.hooksByEvent).join(', ') || 'none'})`);
+  pr(`    CLAUDE.md: ${setupOnly.hasClaudeMd ? `${setupOnly.claudeMdBytes} bytes` : 'not found'}`);
+  pr(`    MCP servers: ${setupOnly.mcpServers}`);
+  pr(`    Skills: ${setupOnly.skillCount}`);
+  pr();
   process.exit(0);
 }
 
