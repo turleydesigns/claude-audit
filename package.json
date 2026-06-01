@@ -1,0 +1,33 @@
+{
+  "name": "@uxcontinuum/ccaudit",
+  "version": "1.0.0",
+  "description": "A diagnostic for your Claude Code setup. Reads ~/.claude/ locally, grades you across hook coverage, project hygiene, tool balance, prompt tells, and pipeline ops. Zero install: npx @uxcontinuum/ccaudit",
+  "main": "index.js",
+  "bin": {
+    "ccaudit": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "ai",
+    "developer-tools",
+    "audit",
+    "diagnostic",
+    "report-card",
+    "cli"
+  ],
+  "author": "Matt Turley <mt@turleydesigns.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/turleydesigns/claude-audit"
+  },
+  "homepage": "https://github.com/turleydesigns/claude-audit#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
