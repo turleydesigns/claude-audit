@@ -75,6 +75,14 @@ function projDirName(filePath) {
   return idx >= 0 && idx + 1 < parts.length ? parts[idx + 1] : '';
 }
 
+// Cheap fingerprint of a tool_use input. Used to detect within-session retries.
+function fpToolUse(name, input) {
+  const key = typeof input === 'object' && input
+    ? (input.command || input.file_path || input.path || input.pattern || JSON.stringify(input))
+    : String(input ?? '');
+  return name + '::' + String(key).slice(0, 200);
+}
+
 function parseSession(filePath, cutoffMs) {
   let lines;
   try { lines = fs.readFileSync(filePath, 'utf8').split('\n'); } catch (_) { return null; }
@@ -92,6 +100,8 @@ function parseSession(filePath, cutoffMs) {
   let entrypoint   = null;
   let claudeVersion = null;
   let messageCount = 0;
+  let toolErrors   = 0;
+  const fpCounts = new Map(); // tool_use fingerprint → count, for retry detection
 
   for (const raw of lines) {
     if (!raw) continue;
@@ -119,7 +129,11 @@ function parseSession(filePath, cutoffMs) {
     if (msg.type === 'user') {
       const c = msg.message?.content;
       if (Array.isArray(c)) {
-        for (const b of c) if (b?.type === 'text' && b.text?.trim()) userPrompts.push(b.text.trim());
+        for (const b of c) {
+          if (b?.type === 'text' && b.text?.trim()) userPrompts.push(b.text.trim());
+          // tool_result blocks appear in user messages. is_error true = the tool call failed.
+          if (b?.type === 'tool_result' && b.is_error === true) toolErrors++;
+        }
       } else if (typeof c === 'string' && c.trim()) {
         userPrompts.push(c.trim());
       }
@@ -128,7 +142,13 @@ function parseSession(filePath, cutoffMs) {
     if (msg.type === 'assistant') {
       const c = msg.message?.content;
       if (Array.isArray(c)) {
-        for (const b of c) if (b?.type === 'tool_use') toolCalls.push(b.name || 'unknown');
+        for (const b of c) {
+          if (b?.type === 'tool_use') {
+            toolCalls.push(b.name || 'unknown');
+            const fp = fpToolUse(b.name || 'unknown', b.input);
+            fpCounts.set(fp, (fpCounts.get(fp) || 0) + 1);
+          }
+        }
       }
       const u = msg.message?.usage;
       if (u) {
@@ -141,13 +161,14 @@ function parseSession(filePath, cutoffMs) {
   if (!timestamps.length) return null;
 
   const projDir = projDirName(filePath);
-  // Multi-signal agent detector. Any of these is sufficient:
-  //   - isSidechain: subagent inside another Claude session
-  //   - userType non-external: internal automation invocation
-  //   - dir-name matches UUID/hex pattern: orchestrator-spawned worktree
   const isAgent = isSidechain ||
                   (userType && userType !== 'external') ||
                   fallbackAgentDirGuess(projDir);
+
+  // Within-session retries: any fingerprint that fired >1 time. Count the
+  // excess fires beyond the first as retries.
+  let retries = 0;
+  for (const c of fpCounts.values()) if (c > 1) retries += (c - 1);
 
   return {
     projDir,
@@ -157,6 +178,8 @@ function parseSession(filePath, cutoffMs) {
     cwd: cwd || '',
     userPrompts,
     toolCalls,
+    toolErrors,
+    retries,
     timestamps,
     outputTokens,
     inputTokens,
@@ -283,6 +306,19 @@ function aggregate(sessions) {
     const outputTokens = subset.reduce((n, s) => n + s.outputTokens, 0);
     const inputTokens  = subset.reduce((n, s) => n + s.inputTokens, 0);
 
+    const toolErrorsTotal = subset.reduce((n, s) => n + (s.toolErrors || 0), 0);
+    const retriesTotal    = subset.reduce((n, s) => n + (s.retries || 0), 0);
+    const toolErrorRate   = tools.length ? (100 * toolErrorsTotal / tools.length) : 0;
+    const retriesPerSession = subset.length ? (retriesTotal / subset.length) : 0;
+
+    // Median session length (message count). Cheaper proxy for first-shot success.
+    const lengths = subset.map(s => s.messageCount).sort((a, b) => a - b);
+    const medianLen = lengths.length
+      ? (lengths.length % 2 === 1
+          ? lengths[(lengths.length - 1) / 2]
+          : Math.round((lengths[lengths.length / 2 - 1] + lengths[lengths.length / 2]) / 2))
+      : 0;
+
     return {
       sessions: subset.length,
       prompts: prompts.length,
@@ -300,6 +336,11 @@ function aggregate(sessions) {
       outputTokens,
       inputTokens,
       totalTools: tools.length,
+      toolErrorRate: Math.round(toolErrorRate * 10) / 10,
+      toolErrorsTotal,
+      retriesTotal,
+      retriesPerSession: Math.round(retriesPerSession * 10) / 10,
+      medianSessionLength: medianLen,
     };
   };
 
@@ -443,7 +484,37 @@ function grade(stats, setup) {
     });
   }
 
-  // 5. Agent pipeline grade (only if agent sessions exist).
+  // 5. Output signals (human sessions only). Best available local proxy for
+  // whether your sessions actually produce results vs grinding. Three inputs:
+  //   - tool error rate (lower = cleaner runs)
+  //   - retries per session (lower = first-shot success)
+  //   - median session length (very long = stuck, very short = trivial)
+  if (human.sessions && human.totalTools > 0) {
+    let oScore = 80;
+    if (human.toolErrorRate > 15) oScore -= 18;
+    else if (human.toolErrorRate > 8) oScore -= 10;
+    else if (human.toolErrorRate > 4) oScore -= 4;
+
+    if (human.retriesPerSession > 6) oScore -= 12;
+    else if (human.retriesPerSession > 3) oScore -= 6;
+
+    if      (human.medianSessionLength > 100) oScore -= 15; // genuinely stuck
+    else if (human.medianSessionLength > 50)  oScore -= 6;  // long grinds
+    else if (human.medianSessionLength >= 2 && human.medianSessionLength <= 20) oScore += 4; // healthy
+
+    oScore = Math.max(0, Math.min(100, oScore));
+
+    dims.push({
+      name: 'Output signals',
+      score: oScore,
+      detail: `Tool error rate ${human.toolErrorRate}%, ${human.retriesPerSession} retries per session, median session ${human.medianSessionLength} messages.`,
+      fix: human.toolErrorRate > 15
+        ? 'Your tool error rate is high. Sessions are fighting the environment more than producing output.'
+        : null,
+    });
+  }
+
+  // 6. Agent pipeline grade (only if agent sessions exist).
   if (agent.sessions) {
     let aScore = 75;
     if (agent.sessions > 50) aScore += 8;
@@ -604,6 +675,11 @@ if (hasFlag('--json')) {
       },
       output_tokens: stats.human.outputTokens,
       input_tokens: stats.human.inputTokens,
+      tool_error_rate_pct: stats.human.toolErrorRate,
+      tool_errors_total: stats.human.toolErrorsTotal,
+      retries_total: stats.human.retriesTotal,
+      retries_per_session: stats.human.retriesPerSession,
+      median_session_length: stats.human.medianSessionLength,
     } : null,
     agent: stats.agent ? {
       sessions: stats.agent.sessions,
