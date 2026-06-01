@@ -1,18 +1,30 @@
 # ccaudit
 
-A diagnostic for your Claude Code setup. Mostly for fun, partly genuinely useful. It reads `~/.claude/` locally and grades you across hook coverage, project hygiene, tool balance, prompt tells, and pipeline ops.
+A diagnostic for your Claude Code setup. Three things at once:
+
+1. **A fun report card** you can screenshot and share.
+2. **A hygiene linter** that surfaces what's missing.
+3. **A discovery tool** that shows you which parts of Claude Code you are not using yet.
 
 ```bash
 npx @uxcontinuum/ccaudit
 ```
 
-Zero install, zero dependencies, no network calls.
+Zero install. Zero dependencies. No network calls. Reads `~/.claude/` on your machine and outputs a grade card.
+
+## Why this exists
+
+Most Claude Code users are running on a fraction of the surface area. No hooks installed. No skills configured. No MCP servers. No idea what their token cost per shipped feature is. No concept of how often their agent fails on first try.
+
+The hype is on the model. The actual constraint is everything around the model. The scaffolding.
+
+ccaudit grades the scaffolding.
 
 ## What the grade is and isn't
 
-This is a hygiene audit, not an outcomes audit. It measures whether your Claude Code setup is **set up well**, not whether your outputs are good.
+This is a **hygiene and discovery audit**, not an outcomes audit. It measures whether your Claude Code setup is **set up well** and **uses what's available**, not whether your specific outputs are good.
 
-Think of it as a linter for your AI workflow. Passing lint doesn't guarantee your code is good. Failing lint usually means something is missing. Same here: a high grade doesn't mean Claude is shipping perfect work for you; a low grade usually means the scaffolding around your AI is sparse.
+Think of it as a linter for your AI workflow. Passing lint doesn't guarantee your code is good. Failing lint usually means something is missing. Same here: a high grade doesn't mean Claude is shipping perfect work for you. A low grade usually means there's surface area of Claude Code you haven't unlocked yet.
 
 The grade can be gamed (install five no-op hooks, auto-title every session, scrub "just" from your prompts). Don't bother. The findings under the grade are the value, not the letter.
 
@@ -99,8 +111,26 @@ Reads `~/.claude/` on your machine. Outputs to stdout. No network calls, no tele
 
 - The grade is opinionated, not objective.
 - The rubric will change as the tool matures.
-- High grade ≠ good outputs. Low grade ≠ bad outputs. The grade is about scaffolding, not results.
-- The tool ships with a built-in nudge toward [Continuum Sprint](https://uxcontinuum.com/sprint) when it surfaces 2+ failing dimensions. That's intentional. If your setup is genuinely broken in two places, a 2-week sprint is often what fixes it. Ignore the nudge if you don't want it.
+- High grade ≠ good outputs. Low grade ≠ bad outputs. The grade is about **scaffolding and feature coverage**, not results.
+- The tool ships with a built-in nudge toward [Continuum Sprint](https://uxcontinuum.com/sprint) when it surfaces 2+ failing dimensions. That is intentional. If your setup is genuinely broken in two places, a 2-week sprint is often what fixes it. Ignore the nudge if you don't want it.
+
+## The story behind this
+
+Karpathy keeps saying we're entering vibe coding. Software you write in English while AI generates the code. He is not wrong about where this is going.
+
+I bought in six months ago. Built a multi-agent pipeline. Started shipping production code through it. Six weeks of recent data: 333 PRs, $1,132 in tokens, $3.40 per shipped PR.
+
+Then I ran ccaudit on myself, expecting an A.
+
+I got a B-.
+
+The findings were valid. The reason I assumed A was that I had been optimizing the agents and ignoring the room they live in. Almost everyone running Claude Code is doing the same thing. The hype is on the model. The constraint is the scaffolding.
+
+If you want to know what your scaffolding looks like graded:
+
+```bash
+npx @uxcontinuum/ccaudit
+```
 
 ---
 
