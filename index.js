@@ -204,6 +204,7 @@ function inspectClaudeDir(claudeDir) {
     hasClaudeMd: false,
     claudeMdBytes: 0,
     skillCount: 0,
+    skillNames: [],
   };
 
   const settingsPath = path.join(claudeDir, 'settings.json');
@@ -268,13 +269,53 @@ function inspectClaudeDir(claudeDir) {
   try {
     const skillsDir = path.join(claudeDir, 'skills');
     if (fs.statSync(skillsDir).isDirectory()) {
-      out.skillCount = fs.readdirSync(skillsDir).filter(d => {
+      const skills = fs.readdirSync(skillsDir).filter(d => {
         try { return fs.statSync(path.join(skillsDir, d)).isDirectory(); } catch (_) { return false; }
-      }).length;
+      });
+      out.skillCount = skills.length;
+      out.skillNames = skills;
     }
   } catch (_) {}
 
   return out;
+}
+
+// Aggregate setup data across multiple ~/.claude/ candidates so root + user
+// installs (or any multi-home setup) all get counted. Hooks, skills, MCP, and
+// CLAUDE.md bytes sum across dirs; skill names dedupe.
+function inspectAllClaudeDirs(claudeDirs) {
+  const merged = {
+    primary: claudeDirs[0],
+    hooksByEvent: {},
+    totalHooks: 0,
+    autoMemoryEnabled: false,
+    mcpServers: 0,
+    hookFiles: [],
+    hasClaudeMd: false,
+    claudeMdBytes: 0,
+    skillCount: 0,
+    skillNames: [],
+    settingsParseError: null,
+    perDir: [],
+  };
+  const seenSkills = new Set();
+  for (const d of claudeDirs) {
+    const r = inspectClaudeDir(d);
+    merged.perDir.push(r);
+    for (const [evt, n] of Object.entries(r.hooksByEvent)) {
+      merged.hooksByEvent[evt] = (merged.hooksByEvent[evt] || 0) + n;
+      merged.totalHooks += n;
+    }
+    merged.autoMemoryEnabled = merged.autoMemoryEnabled || r.autoMemoryEnabled;
+    merged.mcpServers        = Math.max(merged.mcpServers, r.mcpServers);
+    merged.hookFiles         = merged.hookFiles.concat(r.hookFiles);
+    merged.hasClaudeMd       = merged.hasClaudeMd || r.hasClaudeMd;
+    merged.claudeMdBytes    += r.claudeMdBytes;
+    for (const s of r.skillNames) if (!seenSkills.has(s)) { seenSkills.add(s); merged.skillNames.push(s); }
+    if (r.settingsParseError && !merged.settingsParseError) merged.settingsParseError = r.settingsParseError;
+  }
+  merged.skillCount = merged.skillNames.length;
+  return merged;
 }
 
 // ── AGGREGATE ─────────────────────────────────────────────────────────────────
@@ -469,18 +510,28 @@ function grade(stats, setup) {
   // 4. Prompt tells (the "just"/"please" tax).
   if (human.sessions && human.prompts > 0) {
     const justRate = human.justCount / human.prompts;
+    const pleaseRate = human.pleaseCount / human.prompts;
     let pScore = 85;
     if (justRate > 0.5) pScore -= 12;
     if (justRate > 1.0) pScore -= 15;
-    if (human.pleaseCount / human.prompts > 0.3) pScore -= 6;
+    if (pleaseRate > 0.3) pScore -= 6;
     pScore = Math.max(0, Math.min(100, pScore));
+
+    // Build a data-driven fix message that names the actual ratios.
+    let pFix = null;
+    if (justRate > 1.0) {
+      pFix = `${(justRate*100).toFixed(0)}% of your prompts contain "just" (often multiple times). You are telegraphing that you think every task is trivial. They are not. Strip it from the next 10 prompts and watch what changes.`;
+    } else if (justRate > 0.5) {
+      pFix = `Roughly one in two of your prompts contains "just" (${human.justCount} out of ${human.prompts}). It is the most reliable signal that you think the task is simpler than it is. Worth dropping.`;
+    } else if (pleaseRate > 0.3) {
+      pFix = `You said "please" in ${(pleaseRate*100).toFixed(0)}% of your prompts. Politeness costs tokens and confuses scope. Direct prompts work better.`;
+    }
+
     dims.push({
       name: 'Prompt tells',
       score: pScore,
-      detail: `You said "just" ${human.justCount} times across ${human.prompts} prompts (${(justRate * 100).toFixed(0)}%).`,
-      fix: justRate > 0.5
-        ? 'The word "just" telegraphs that you think the task is simple. It is not. Strip it.'
-        : null,
+      detail: `"just" appears in ${(justRate*100).toFixed(0)}% of prompts (${human.justCount}x). "please" in ${(pleaseRate*100).toFixed(0)}% (${human.pleaseCount}x).`,
+      fix: pFix,
     });
   }
 
@@ -538,6 +589,14 @@ function grade(stats, setup) {
 }
 
 // ── OUTPUT ────────────────────────────────────────────────────────────────────
+const LOGO = [
+  '  ██████  ██████  ██████   ██  ██  ██████   ██  ██████████',
+  '  ██      ██      ██   ██  ██  ██  ██   ██  ██      ██    ',
+  '  ██      ██      ██████   ██  ██  ██   ██  ██      ██    ',
+  '  ██      ██      ██   ██  ██  ██  ██   ██  ██      ██    ',
+  '  ██████  ██████  ██   ██  ██████  ██████   ██      ██    ',
+];
+
 function renderCard(stats, setup, graded) {
   const bar = (n) => {
     const filled = Math.round(n / 5);
@@ -545,8 +604,9 @@ function renderCard(stats, setup, graded) {
   };
 
   pr();
-  pr(`  ${C.bold}${C.white}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
-  pr(`  ${C.bold}${C.white}  CCAUDIT${C.reset}${C.dim}  your Claude Code report card${C.reset}`);
+  for (const line of LOGO) pr(`${C.bold}${C.cyan}${line}${C.reset}`);
+  pr();
+  pr(`  ${C.dim}your claude code report card${C.reset}    ${C.dim}·${C.reset}    ${C.dim}npx @uxcontinuum/ccaudit${C.reset}`);
   pr(`  ${C.bold}${C.white}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
   pr();
 
@@ -582,15 +642,106 @@ function renderCard(stats, setup, graded) {
 
   pr();
   pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
-  pr(`  ${C.dim}Run it on your own machine: ${C.reset}${C.bold}npx @uxcontinuum/ccaudit${C.reset}`);
-  pr(`  ${C.dim}Source + fixes:${C.reset}             github.com/turleydesigns/claude-audit`);
+  pr(`  ${C.dim}Run it yourself:${C.reset}    ${C.bold}npx @uxcontinuum/ccaudit${C.reset}`);
+  pr(`  ${C.dim}See next steps:${C.reset}     ${C.bold}npx @uxcontinuum/ccaudit --next-steps${C.reset}`);
+  pr(`  ${C.dim}Source + fixes:${C.reset}     github.com/turleydesigns/claude-audit`);
 
   const failingDims = graded.dims.filter(d => d.score < 75).length;
   if (failingDims >= 2) {
     pr();
-    pr(`  ${C.bold}${C.yellow}${failingDims} dimensions flagged. The Continuum Sprint fixes setups like this in 2 weeks.${C.reset}`);
-    pr(`  ${C.dim}continuum.build${C.reset}`);
+    pr(`  ${C.bold}${C.yellow}${failingDims} dimensions flagged.${C.reset} ${C.dim}Need help with your setup?${C.reset} ${C.bold}uxcontinuum.com${C.reset}`);
   }
+  pr();
+}
+
+
+// ── NEXT STEPS RENDERER ───────────────────────────────────────────────────────
+function renderNextSteps(stats, setup, graded) {
+  pr();
+  pr(`  ${C.bold}${C.cyan}NEXT STEPS${C.reset}    ${C.dim}prioritized actions based on your audit${C.reset}`);
+  pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
+  pr();
+
+  const steps = [];
+
+  if (setup.totalHooks === 0) {
+    steps.push({ p: 'HIGH', a: 'Install at least one PreToolUse hook',
+      d: 'You have zero hooks. Runaway agent loops will burn money overnight if you let them.',
+      link: 'github.com/turleydesigns/claude-loop-sentinel' });
+  } else if (setup.totalHooks < 3) {
+    steps.push({ p: 'MED', a: 'Expand hook coverage',
+      d: `${setup.totalHooks} hook(s) configured. Most healthy setups have at least PreToolUse, PostToolUse, and Stop.`,
+      link: 'docs.anthropic.com/en/docs/claude-code/hooks' });
+  }
+
+  const pipeDim = graded.dims.find(d => d.name === 'Pipeline ops (agent sessions)');
+  if (pipeDim && setup.totalHooks === 0) {
+    steps.push({ p: 'HIGH', a: 'Add hooks before next overnight run',
+      d: 'You are running an agent pipeline with no runtime guards. This is how bills explode.',
+      link: 'github.com/turleydesigns/claude-loop-sentinel' });
+  }
+
+  if (stats.human && stats.human.titledPct < 20 && stats.human.uniqueCwds < 5) {
+    steps.push({ p: 'MED', a: 'Title your important sessions or scope by CWD',
+      d: `${stats.human.titledPct}% titled, ${stats.human.uniqueCwds} distinct working dirs. You will not find this work later.`,
+      link: null });
+  }
+
+  if (stats.human && stats.human.bashPct > 65) {
+    const editAbs = Math.round(stats.human.editPct * stats.human.totalTools / 100);
+    if (editAbs < 200) {
+      steps.push({ p: 'MED', a: 'Edit/Write instead of running commands',
+        d: `Bash is ${stats.human.bashPct}% of your tool calls (${editAbs} Edit calls total). You are running things, not editing them.`,
+        link: null });
+    }
+  }
+
+  if (stats.human && stats.human.justCount / stats.human.prompts > 0.5) {
+    const rate = Math.round(100 * stats.human.justCount / stats.human.prompts);
+    steps.push({ p: 'LOW', a: 'Drop "just" from your prompts',
+      d: `"just" in ${rate}% of your prompts. Try the next 10 without it and watch the responses change.`,
+      link: null });
+  }
+
+  if (stats.human && stats.human.toolErrorRate > 8) {
+    steps.push({ p: 'MED', a: 'Investigate tool error rate',
+      d: `${stats.human.toolErrorRate}% of your tool calls error. Sessions are fighting the environment.`,
+      link: null });
+  }
+
+  if (setup.mcpServers === 0) {
+    steps.push({ p: 'LOW', a: 'Try an MCP server',
+      d: 'Zero MCP servers configured. They unlock work Claude Code cannot do alone (filesystem, browser, API access).',
+      link: 'docs.anthropic.com/en/docs/claude-code/mcp' });
+  }
+
+  if (setup.skillCount < 3) {
+    steps.push({ p: 'LOW', a: 'Install a few Claude Code skills',
+      d: `${setup.skillCount} skill(s) installed. Skills let you invoke domain expertise with /name.`,
+      link: 'docs.anthropic.com/en/docs/claude-code/skills' });
+  }
+
+  if (!steps.length) {
+    pr(`  ${C.green}Your setup looks healthy. No critical next steps surfaced.${C.reset}`);
+    pr();
+    return;
+  }
+
+  const order = { HIGH: 0, MED: 1, LOW: 2 };
+  steps.sort((a, b) => order[a.p] - order[b.p]);
+
+  let i = 1;
+  for (const s of steps) {
+    const pColor = s.p === 'HIGH' ? C.red : (s.p === 'MED' ? C.yellow : C.cyan);
+    pr(`  ${C.bold}${String(i).padStart(2)}.${C.reset} ${pColor}${C.bold}[${s.p}]${C.reset}  ${C.bold}${s.a}${C.reset}`);
+    pr(`      ${C.dim}${s.d}${C.reset}`);
+    if (s.link) pr(`      ${C.dim}→ ${s.link}${C.reset}`);
+    pr();
+    i++;
+  }
+
+  pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
+  pr(`  ${C.dim}Need help working through these?${C.reset}  ${C.bold}uxcontinuum.com${C.reset}`);
   pr();
 }
 
@@ -615,7 +766,7 @@ if (!sessions.length) {
     pr(`  ${C.dim}Try --days 90 or --days 365 to widen the window.${C.reset}`);
   }
   // Still surface the setup audit even with no sessions, so brand-new users get value.
-  const setupOnly = inspectClaudeDir(CLAUDE_DIRS[0]);
+  const setupOnly = inspectAllClaudeDirs(CLAUDE_DIRS);
   pr();
   pr(`  ${C.bold}Setup snapshot:${C.reset}`);
   pr(`    Hooks: ${setupOnly.totalHooks} (${Object.keys(setupOnly.hooksByEvent).join(', ') || 'none'})`);
@@ -627,10 +778,13 @@ if (!sessions.length) {
 }
 
 const stats  = aggregate(sessions);
-const setup  = inspectClaudeDir(CLAUDE_DIRS[0]);
+const setup  = inspectAllClaudeDirs(CLAUDE_DIRS);
 const graded = grade(stats, setup);
 
-if (hasFlag('--json')) {
+if (hasFlag('--next-steps')) {
+  renderCard(stats, setup, graded);
+  renderNextSteps(stats, setup, graded);
+} else if (hasFlag('--json')) {
   // Programmatic output. Stable shape for downstream tools and the future
   // public-benchmark backend. No personal content (prompts, slugs, CWDs).
   const payload = {
