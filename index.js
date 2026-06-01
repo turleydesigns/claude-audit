@@ -362,17 +362,19 @@ function grade(stats, setup) {
   // 2. Project hygiene (human sessions only).
   // Three signals: custom titles (strongest), slugs (informal auto-titles),
   // and CWD diversity (project-scoped work via tmux or shell). Any of these
-  // counts as organizational hygiene.
+  // counts as organizational hygiene. Long prompts are a tell only when CWD
+  // count is low (single project + walls of text = unscoped sprawl).
   if (human.sessions) {
     let hScore = 50;
     hScore += Math.round(human.titledPct * 0.35);      // formal title bonus
-    hScore += Math.round(human.sluggedPct * 0.15);     // slug bonus (smaller)
-    // CWD diversity: launching Claude from named project dirs is good hygiene
-    if (human.uniqueCwds >= 3)  hScore += 8;
-    if (human.uniqueCwds >= 10) hScore += 7;
-    if (human.uniqueCwds >= 25) hScore += 5;
-    if (human.avgPromptLen > 0 && human.avgPromptLen < 80) hScore -= 8;
-    if (human.avgPromptLen > 1500) hScore -= 6;
+    hScore += Math.round(human.sluggedPct * 0.15);     // slug bonus
+    // CWD diversity: launching from named project dirs is real hygiene.
+    if (human.uniqueCwds >= 3)  hScore += 10;
+    if (human.uniqueCwds >= 10) hScore += 10;
+    if (human.uniqueCwds >= 25) hScore += 6;
+    if (human.avgPromptLen > 0 && human.avgPromptLen < 80) hScore -= 6;
+    // Walls of text are only a problem when work is unscoped.
+    if (human.avgPromptLen > 2500 && human.uniqueCwds < 5) hScore -= 8;
     hScore = Math.max(0, Math.min(100, hScore));
     const titleNote = human.titledPct > 0
       ? `${human.titledPct}% titled`
@@ -387,21 +389,39 @@ function grade(stats, setup) {
     });
   }
 
-  // 3. Tool balance (human sessions only).
+  // 3. Tool balance (human sessions only). Adaptive: don't punish Bash
+  // dominance if absolute Edit volume is high, because that's "busy operator"
+  // not "bash hammer." Only penalize when Edit absolute volume is also low.
   if (human.sessions && human.totalTools > 0) {
     let bScore = 75;
-    if (human.bashPct > 65) bScore -= 18; // bash hammer
-    if (human.readPct + human.grepPct + human.editPct < 15) bScore -= 12;
-    if (human.editPct > 10 && human.editPct < 55) bScore += 8; // healthy editing
-    if (human.agentPct > 2) bScore += 7; // delegates work
+    const editAbs = Math.round(human.editPct * human.totalTools / 100);
+    const readAbs = Math.round(human.readPct * human.totalTools / 100);
+
+    // Bash dominance penalty scales with how thin the rest of the toolkit is.
+    if (human.bashPct > 65) {
+      if (editAbs > 500) bScore -= 6;   // big absolute Edit volume — busy operator
+      else if (editAbs > 100) bScore -= 12;
+      else bScore -= 18;                // truly a bash hammer
+    } else if (human.bashPct > 50) {
+      bScore -= 4;
+    }
+
+    if (human.readPct + human.grepPct + human.editPct < 15) bScore -= 10;
+    if (human.editPct > 10 && human.editPct < 55) bScore += 8;
+    if (human.agentPct > 2) bScore += 7;
+    if (human.agentPct > 5) bScore += 5;
+
     bScore = Math.max(0, Math.min(100, bScore));
+
+    const fix = human.bashPct > 65 && editAbs < 200
+      ? 'You are running things, not editing things. Use Edit/Write more.'
+      : null;
+
     dims.push({
       name: 'Tool balance (human)',
       score: bScore,
-      detail: `Bash ${human.bashPct}%, Edit+Write ${human.editPct}%, Read ${human.readPct}%, Grep+Glob ${human.grepPct}%, Agent/Task ${human.agentPct}%.`,
-      fix: human.bashPct > 65
-        ? 'You are running things, not editing things. Use Edit/Write more.'
-        : null,
+      detail: `Bash ${human.bashPct}%, Edit+Write ${human.editPct}% (${editAbs} calls), Read ${human.readPct}%, Grep+Glob ${human.grepPct}%, Agent/Task ${human.agentPct}%.`,
+      fix,
     });
   }
 
@@ -539,4 +559,60 @@ const stats  = aggregate(sessions);
 const setup  = inspectClaudeDir(CLAUDE_DIRS[0]);
 const graded = grade(stats, setup);
 
-renderCard(stats, setup, graded);
+if (hasFlag('--json')) {
+  // Programmatic output. Stable shape for downstream tools and the future
+  // public-benchmark backend. No personal content (prompts, slugs, CWDs).
+  const payload = {
+    schema: 'ccaudit/1',
+    generated_at: new Date().toISOString(),
+    window_days: days,
+    overall: { score: graded.overall, letter: graded.letter },
+    dimensions: graded.dims.map(d => ({
+      name: d.name,
+      score: d.score,
+      letter: letterFor(d.score),
+      detail: d.detail,
+      fix: d.fix,
+    })),
+    setup: {
+      total_hooks: setup.totalHooks,
+      hooks_by_event: setup.hooksByEvent,
+      auto_memory_enabled: setup.autoMemoryEnabled,
+      mcp_servers: setup.mcpServers,
+      hook_files: setup.hookFiles.length,
+      has_claude_md: setup.hasClaudeMd,
+      claude_md_bytes: setup.claudeMdBytes,
+      skills_installed: setup.skillCount,
+      settings_parse_error: setup.settingsParseError,
+    },
+    human: stats.human ? {
+      sessions: stats.human.sessions,
+      prompts: stats.human.prompts,
+      titled_pct: stats.human.titledPct,
+      slugged_pct: stats.human.sluggedPct,
+      unique_cwds: stats.human.uniqueCwds,
+      avg_prompt_len: stats.human.avgPromptLen,
+      just_count: stats.human.justCount,
+      please_count: stats.human.pleaseCount,
+      total_tools: stats.human.totalTools,
+      tool_distribution: {
+        bash_pct: stats.human.bashPct,
+        edit_write_pct: stats.human.editPct,
+        read_pct: stats.human.readPct,
+        grep_glob_pct: stats.human.grepPct,
+        agent_task_pct: stats.human.agentPct,
+      },
+      output_tokens: stats.human.outputTokens,
+      input_tokens: stats.human.inputTokens,
+    } : null,
+    agent: stats.agent ? {
+      sessions: stats.agent.sessions,
+      prompts: stats.agent.prompts,
+      output_tokens: stats.agent.outputTokens,
+      input_tokens: stats.agent.inputTokens,
+    } : null,
+  };
+  process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+} else {
+  renderCard(stats, setup, graded);
+}
