@@ -145,6 +145,10 @@ function inspectClaudeDir(claudeDir) {
     preToolUseHooks: 0,
     postToolUseHooks: 0,
     userPromptSubmitHooks: 0,
+    stopHooks: 0,
+    subagentStopHooks: 0,
+    notificationHooks: 0,
+    autoMemoryEnabled: false,
     hookFiles: [],
     hasClaudeMd: false,
     claudeMdBytes: 0,
@@ -163,6 +167,10 @@ function inspectClaudeDir(claudeDir) {
         out.preToolUseHooks       = count(hooks.PreToolUse);
         out.postToolUseHooks      = count(hooks.PostToolUse);
         out.userPromptSubmitHooks = count(hooks.UserPromptSubmit);
+        out.stopHooks             = count(hooks.Stop);
+        out.subagentStopHooks     = count(hooks.SubagentStop);
+        out.notificationHooks     = count(hooks.Notification);
+        out.autoMemoryEnabled     = s.autoMemoryEnabled === true;
       } catch (_) {}
     }
   } catch (_) {}
@@ -275,20 +283,33 @@ function grade(stats, setup) {
   const agent = stats.agent || {};
 
   // 1. Hook coverage. Lives at the setup layer, applies to everyone.
-  const hookSignals = setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks;
+  const hookSignals =
+    setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks +
+    setup.stopHooks + setup.subagentStopHooks + setup.notificationHooks;
   let hookScore;
   if (hookSignals === 0) hookScore = 35;
-  else if (hookSignals === 1) hookScore = 65;
+  else if (hookSignals === 1) hookScore = 68;
   else if (hookSignals === 2) hookScore = 82;
-  else hookScore = Math.min(100, 88 + hookSignals * 2);
+  else if (hookSignals === 3) hookScore = 90;
+  else hookScore = Math.min(100, 92 + hookSignals);
+  if (setup.autoMemoryEnabled) hookScore = Math.min(100, hookScore + 3);
+  const hookBreakdown = [
+    setup.preToolUseHooks ? `${setup.preToolUseHooks} PreToolUse` : null,
+    setup.postToolUseHooks ? `${setup.postToolUseHooks} PostToolUse` : null,
+    setup.userPromptSubmitHooks ? `${setup.userPromptSubmitHooks} UserPromptSubmit` : null,
+    setup.stopHooks ? `${setup.stopHooks} Stop` : null,
+    setup.subagentStopHooks ? `${setup.subagentStopHooks} SubagentStop` : null,
+    setup.notificationHooks ? `${setup.notificationHooks} Notification` : null,
+    setup.autoMemoryEnabled ? 'autoMemory plugin' : null,
+  ].filter(Boolean).join(', ');
   dims.push({
     name: 'Hook coverage',
     score: hookScore,
     detail: hookSignals === 0
-      ? 'No PreToolUse, PostToolUse, or UserPromptSubmit hooks installed. Anything could happen overnight.'
-      : `${setup.preToolUseHooks} PreToolUse, ${setup.postToolUseHooks} PostToolUse, ${setup.userPromptSubmitHooks} UserPromptSubmit hook(s) installed.`,
+      ? 'No hooks installed across any event. Anything could happen overnight.'
+      : `${hookBreakdown}.`,
     fix: hookSignals === 0
-      ? 'Install claude-loop-sentinel for runaway-loop protection: npm i @uxcontinuum/claude-loop-sentinel'
+      ? 'Install claude-loop-sentinel for runaway-loop protection: https://github.com/turleydesigns/claude-loop-sentinel'
       : null,
   });
 
@@ -403,7 +424,7 @@ function renderCard(stats, setup, graded) {
   if (stats.agent) {
     pr(`    ${C.dim}Agent sessions:${C.reset}  ${stats.agent.sessions} sessions, ${(stats.agent.outputTokens / 1e6).toFixed(2)}M output tokens`);
   }
-  pr(`    ${C.dim}Hooks installed:${C.reset} ${setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks} (${setup.hookFiles.length} hook file(s) in ~/.claude/hooks/)`);
+  pr(`    ${C.dim}Hooks installed:${C.reset} ${setup.preToolUseHooks + setup.postToolUseHooks + setup.userPromptSubmitHooks + setup.stopHooks + setup.subagentStopHooks + setup.notificationHooks} across all event types (${setup.hookFiles.length} hook file(s) in ~/.claude/hooks/)`);
   pr(`    ${C.dim}CLAUDE.md:${C.reset}       ${setup.hasClaudeMd ? `${setup.claudeMdBytes} bytes` : 'not found'}`);
   pr(`    ${C.dim}Skills installed:${C.reset} ${setup.skillCount}`);
 
