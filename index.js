@@ -648,13 +648,9 @@ function renderCard(stats, setup, graded) {
   pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
   pr(`  ${C.dim}Run it yourself:${C.reset}    ${C.bold}npx @uxcontinuum/ccaudit${C.reset}`);
   pr(`  ${C.dim}See next steps:${C.reset}     ${C.bold}npx @uxcontinuum/ccaudit --next-steps${C.reset}`);
-  pr(`  ${C.dim}Source + fixes:${C.reset}     github.com/turleydesigns/claude-audit`);
-
-  const failingDims = graded.dims.filter(d => d.score < 75).length;
-  if (failingDims >= 2) {
-    pr();
-    pr(`  ${C.bold}${C.yellow}${failingDims} dimensions flagged.${C.reset} ${C.dim}Need help with your setup?${C.reset} ${C.bold}uxcontinuum.com${C.reset}`);
-  }
+  pr(`  ${C.dim}Source:${C.reset}             github.com/turleydesigns/claude-audit`);
+  pr();
+  pr(`  ${C.dim}Built by Matt Turley · uxcontinuum.com${C.reset}`);
   pr();
 }
 
@@ -745,7 +741,7 @@ function renderNextSteps(stats, setup, graded) {
   }
 
   pr(`  ${C.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
-  pr(`  ${C.dim}Need help working through these?${C.reset}  ${C.bold}uxcontinuum.com${C.reset}`);
+  pr(`  ${C.dim}Built by Matt Turley · uxcontinuum.com${C.reset}`);
   pr();
 }
 

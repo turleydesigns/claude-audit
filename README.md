@@ -112,7 +112,7 @@ Reads `~/.claude/` on your machine. Outputs to stdout. No network calls, no tele
 - The grade is opinionated, not objective.
 - The rubric will change as the tool matures.
 - High grade ≠ good outputs. Low grade ≠ bad outputs. The grade is about **scaffolding and feature coverage**, not results.
-- The tool ships with a built-in nudge toward [Continuum Sprint](https://uxcontinuum.com/sprint) when it surfaces 2+ failing dimensions. That is intentional. If your setup is genuinely broken in two places, a 2-week sprint is often what fixes it. Ignore the nudge if you don't want it.
+
 
 ## The story behind this
 
