@@ -14,6 +14,9 @@ const C = {
   bold: '\x1b[1m', dim: '\x1b[2m', reset: '\x1b[0m',
   green: '\x1b[92m', yellow: '\x1b[93m', red: '\x1b[91m',
   cyan: '\x1b[96m', white: '\x1b[97m', magenta: '\x1b[95m',
+  // Claude Code coral (RGB 218,119,86) and its shadow (dark coral).
+  coral: '\x1b[38;2;218;119;86m',
+  coralDark: '\x1b[38;2;140;72;48m',
 };
 const hasFlag = (f) => process.argv.includes(f);
 if (hasFlag('--no-color')) { for (const k in C) C[k] = ''; }
@@ -604,9 +607,10 @@ function renderCard(stats, setup, graded) {
   };
 
   pr();
-  for (const line of LOGO) pr(`${C.bold}${C.cyan}${line}${C.reset}`);
+  for (const line of LOGO) pr(`${C.bold}${C.coral}${line}${C.reset}`);
+  pr(`${C.coralDark}${LOGO[LOGO.length - 1].replace(/./g, (ch) => ch === ' ' ? ' ' : '▀')}${C.reset}`);
   pr();
-  pr(`  ${C.dim}your claude code report card${C.reset}    ${C.dim}·${C.reset}    ${C.dim}npx @uxcontinuum/ccaudit${C.reset}`);
+  pr(`  ${C.dim}your claude code report card${C.reset}    ${C.coral}·${C.reset}    ${C.dim}npx @uxcontinuum/ccaudit${C.reset}`);
   pr(`  ${C.bold}${C.white}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C.reset}`);
   pr();
 
